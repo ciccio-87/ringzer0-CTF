@@ -1,0 +1,175 @@
+RingZer0 CTF Javascript challenge #7 "Why not be more secure?" WriteUp
+
+Welcome back to the RingZer0 Writeup series, today we'll be cracking
+the last (at time of writing) Javascript authentication challenge.
+
+So let's start examining the code:
+
+"
+<script>
+	// Look's like weak JavaScript auth script :)
+	$(".c_submit").click(function(event) {
+		event.preventDefault();
+		var u = $("#cpass").val();
+		var k = $("#cuser").val();
+		var func = "\x2B\x09\x4A\x03\x49\x0F\x0E\x14\x15\x1A\x00\x10\x3F\x1A\x71\x5C\x5B\x5B\x00\x1A\x16\x38\x06
+			\x46\x66\x5A\x55\x30\x0A\x03\x1D\x08\x50\x5F\x51\x15\x6B\x4F\x19\x56\x00\x54\x1B\x50\x58\x21\x1A
+			\x0F\x13\x07\x46\x1D\x58\x58\x21\x0E\x16\x1F\x06\x5C\x1D\x5C\x45\x27\x09\x4C\x1F\x07\x56\x56\x4C
+			\x78\x24\x47\x40\x49\x19\x0F\x11\x1D\x17\x7F\x52\x42\x5B\x58\x1B\x13\x4F\x17\x26\x00\x01\x03\x04
+			\x57\x5D\x40\x19\x2E\x00\x01\x17\x1D\x5B\x5C\x5A\x17\x7F\x4F\x06\x19\x0A\x47\x5E\x51\x59\x36\x41
+			\x0E\x19\x0A\x53\x47\x5D\x58\x2C\x41\x0A\x04\x0C\x54\x13\x1F\x17\x60\x50\x12\x4B\x4B\x12\x18\x14
+			\x42\x79\x4F\x1F\x56\x14\x12\x56\x58\x44\x27\x4F\x19\x56\x49\x16\x1B\x16\x14\x21\x1D\x07\x05\x19
+			\x5D\x5D\x47\x52\x60\x46\x4C\x1E\x1D\x5F\x5F\x1C\x15\x7E\x0B\x0B\x00\x49\x51\x5F\x55\x44\x31\x52
+			\x45\x13\x1B\x40\x5C\x46\x10\x7C\x38\x10\x19\x07\x55\x13\x44\x56\x31\x1C\x15\x19\x1B\x56\x13\x47
+			\x58\x30\x1D\x1B\x58\x55\x1D\x57\x5D\x41\x7C\x4D\x4B\x4D\x49\x4F";
+		buf = "";
+		if(k.length == 9) {
+			for(i = 0, j = 0; i < func.length; i++) {
+				c = parseInt(func.charCodeAt(i));
+				c = c ^ k.charCodeAt(j);
+				if(++j == k.length) {
+					j = 0;
+				}
+				buf += eval('"' + a(x(c)) + '"');
+			}
+			eval(buf);
+		} else {
+			$("#cresponse").html("<div class='alert alert-danger'>Wrong password sorry.</div>");
+		}
+	});
+	
+	function a(h) {
+		if(h.length != 2) {
+			h = "\x30" + h;
+		}
+		return "\x5c\x78" + h;
+	}
+	
+	function x(d) {
+		if(d < 0) {
+			d = 0xFFFFFFFF + d + 1;
+		}
+		return d.toString(16).toUpperCase();
+	}
+</script>
+"
+
+Now the first question would probably be: "What the heck is this script doing?"
+If you said a quite convoluted xoring, you'd be right.
+
+In fact the script is xoring func's content with the given username (plus some padding and cleaning
+up due more to the language than to the coder's design), which must be 9 characters long to not
+fail at the first selection, and then evaling it. So the second part of the authentication, the one
+which should give us the redirect to collect our flag, is in func, enciphered with a 9 bytes key which
+we should crack.
+
+What to do next?
+
+1) tl;dr: grab xor-analyze from https://github.com/ThomasHabets/xor-analyze, build it and feed the ciphertext to it
+          (this is how I actually solved the challenge)
+or
+
+2) long version: How the cracking of a multi-xor works?
+
+In a simpler case (far shorter) key length, knowing what we're looking for (a piece of javascript), we could
+simply bruteforce it, this time it doesn't seem a viable option though, we're gonna need a smarter approach.
+
+Looking at any cryptanalysis 101 course/tutorial/whatever, we'll learn that multixor could be modelized after
+a Vigenere cipher, a polyalphabetic substitution cipher (while a xor cypher with a single byte key can be treated
+like a Caesar cipher or a monoalphabetic substitution cipher, that'll come handy later).
+
+The next big discovery is the great weakness of subtitution ciphers: they do not mask/alter significantly
+the statistical characteristic of the plaintext, two of which we will be using in our simple attack.
+
+(**I implemented this simple attack in a python script that you can find here https://github.com/ciccio-87/xor-cracker
+and which will be used later in the writeup**)
+
+The first step to break a Vigenere-like cipher is to find the key lenght (which we already achieved, infering it
+from the code, but let's see it anyway), and the simplest method to do it is the coincidence counting, which is,
+in simple terms, the count of the occurrences of equal characters in the same position between the ciphertext
+and the ciphertext shifted forward of N positions (for N in a range of plausible key lenghts), the shift which
+gives the more coincidences is the most probable key length.
+This method is based on the fact that the probability of a coincidence for a given language is known (~6.7% for english) and when
+we're shifting the ciphertext of the keylen, we'll have all the tuples of characters ciphered with the same byte,
+so the coincedence probability will be the nearest to the statistical one (or most simply, it will be the maximum one).
+
+Example:
+
+"
+ciccio87@envy:~/Documenti/xor-cracker$ echo -ne "\x2B\x09\x4A\x03\x49\x0F\x0E\x14\x15\x1A\x00\x10\x3F\x1A\x71\x5C\x5B\x5B\x00\x1A\x1
+\x38\x06\x46\x66\x5A\x55\x30\x0A\x03\x1D\x08\x50\x5F\x51\x15\x6B\x4F\x19\x56\x00\x54\x1B\x50\x58\x21\x1A\x0F\x13\x07\x46\x1D\x58\x58
+\x21\x0E\x16\x1F\x06\x5C\x1D\x5C\x45\x27\x09\x4C\x1F\x07\x56\x56\x4C\x78\x24\x47\x40\x49\x19\x0F\x11\x1D\x17\x7F\x52\x42\x5B\x58\x1B
+\x13\x4F\x17\x26\x00\x01\x03\x04\x57\x5D\x40\x19\x2E\x00\x01\x17\x1D\x5B\x5C\x5A\x17\x7F\x4F\x06\x19\x0A\x47\x5E\x51\x59\x36\x41\x0E
+\x19\x0A\x53\x47\x5D\x58\x2C\x41\x0A\x04\x0C\x54\x13\x1F\x17\x60\x50\x12\x4B\x4B\x12\x18\x14\x42\x79\x4F\x1F\x56\x14\x12\x56\x58\x44
+\x27\x4F\x19\x56\x49\x16\x1B\x16\x14\x21\x1D\x07\x05\x19\x5D\x5D\x47\x52\x60\x46\x4C\x1E\x1D\x5F\x5F\x1C\x15\x7E\x0B\x0B\x00\x49\x51
+\x5F\x55\x44\x31\x52\x45\x13\x1B\x40\x5C\x46\x10\x7C\x38\x10\x19\x07\x55\x13\x44\x56\x31\x1C\x15\x19\x1B\x56\x13\x47\x58\x30\x1D\x1B
+\x58\x55\x1D\x57\x5D\x41\x7C\x4D\x4B\x4D\x49\x4F" | python xor-cracker.py -lv
+1	7	3.03%
+2	3	1.30%
+3	3	1.30%
+4	3	1.30%
+5	2	0.87%
+6	5	2.16%
+7	2	0.87%
+8	2	0.87%
+9	16	6.93%	--> Winner!
+10	3	1.30%
+11	2	0.87%
+12	3	1.30%
+13	4	1.73%
+14	0	0.00%
+15	0	0.00%
+Most probable key length is 9
+"
+
+Once we got the key length (so where we were starting in the first place), the Vigenere/polyalphabetic cipher can by divided
+in N (N = key lenght) Caesar/monoalphabetic ciphers, everyone of them being the "column" of text ciphered with the same key.
+
+Now, for breaking a Caesar cypher we're using another known statistical property, the statistical distribution (or frequency)
+of the characters, so we'll procede solving every cipher for every possible key (0-255) and comparing the frequency of the
+characters in the plaintext with a known/empirical one, the nearest the most probable (in the script I used a simple chi^2
+comparison but there are plenty of ways of doing it).
+
+So, puttying all togheter we get:
+"
+ciccio87@envy:~/Documenti/xor-cracker$ time -p echo -ne "\x2B\x09\x4A\x03\x49\x0F\x0E\x14\x15\x1A\x00\x10\x3F\x1A\x71\x5C\x5B\x5B\x00
+\x1A\x16\x38\x06\x46\x66\x5A\x55\x30\x0A\x03\x1D\x08\x50\x5F\x51\x15\x6B\x4F\x19\x56\x00\x54\x1B\x50\x58\x21\x1A\x0F\x13\x07\x46\x1D
+\x58\x58\x21\x0E\x16\x1F\x06\x5C\x1D\x5C\x45\x27\x09\x4C\x1F\x07\x56\x56\x4C\x78\x24\x47\x40\x49\x19\x0F\x11\x1D\x17\x7F\x52\x42\x5B
+\x58\x1B\x13\x4F\x17\x26\x00\x01\x03\x04\x57\x5D\x40\x19\x2E\x00\x01\x17\x1D\x5B\x5C\x5A\x17\x7F\x4F\x06\x19\x0A\x47\x5E\x51\x59\x36
+\x41\x0E\x19\x0A\x53\x47\x5D\x58\x2C\x41\x0A\x04\x0C\x54\x13\x1F\x17\x60\x50\x12\x4B\x4B\x12\x18\x14\x42\x79\x4F\x1F\x56\x14\x12\x56
+\x58\x44\x27\x4F\x19\x56\x49\x16\x1B\x16\x14\x21\x1D\x07\x05\x19\x5D\x5D\x47\x52\x60\x46\x4C\x1E\x1D\x5F\x5F\x1C\x15\x7E\x0B\x0B\x00
+\x49\x51\x5F\x55\x44\x31\x52\x45\x13\x1B\x40\x5C\x46\x10\x7C\x38\x10\x19\x07\x55\x13\x44\x56\x31\x1C\x15\x19\x1B\x56\x13\x47\x58\x30
+\x1D\x1B\x58\x55\x1D\x57\x5D\x41\x7C\x4D\x4B\x4D\x49\x4F" | python xor-cracker.py -f Linux4.1.freq 
+Most probable key length is 9
+Now trying to guess the key
+Most probable kay is Bobmi2347
+real 0.24
+user 0.20
+sys 0.00
+"
+
+(Yes it takes less than half a second on a modern machine to crack xor cypher, so do not use it for serious things,
+and yes, I just noted that i mistyped key as "kay" in the script)
+
+So, for the script the right key is "Bobmi2347", which we'll soon discover is not exactly right, as it gives us this plaintext:
+
+"
+if(n == "XorRsCoolButUotUnbreapable") {;if(docum~nt.locatron.href.rndexOf("$p=") == 61) 
+{ docnment.locztion = dtcument.ltcation.hief + "?p&" + u; };} else {; $("#crehponse").stml("<dim class='~rror'>Wrtng passwtrd sorry5</div>")  }
+"
+
+which is pretty near to the desired result but still not perfect, in fact one byte of the key is wrong.
+Now, to finish the challenge we could either infer the wrong byte from (and correct it based on) the plaintext
+or simply pass to a better tool, your choice.
+
+(If you just want the solution, well, the right key is "Bobvi2347", which gives us the plaintext:
+"
+if(u == "XorIsCoolButNotUnbreakable") { if(document.location.href.indexOf("?p=") == -1) { document.location = document.location.href + "?p=" + u; } } 
+else {  $("#cresponse").html("<div class='error'>Wrong password sorry.</div>"); }
+"
+from which the solution should be trivial).
+
+
+
+
+		

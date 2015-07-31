@@ -1,0 +1,67 @@
+Random Login Form (http://ringzer0team.com/challenges/171) WriteUp
+
+Welcome to this (simple and short) writeup for the RingZer0 CTF,
+this time we'll be solving the (at time of writing) fourth SQL injection challenge.
+
+So, let's open the challenge page, and we'll be facing two form, first a login one, and
+then a register one.
+
+Trying to register a new user
+
+"
+ciccio your account has been created
+"
+
+and then log in with the same credentials, we can see it works as expected, 
+but (quite predictable indeed), this is not enough:
+
+"
+Welcome back ciccio, Seem like your not an admin!
+"
+
+So how to become an admin?
+
+Ruling out for now bruteforcing and strict sql injection techniques,
+first thoughts could be to look for some possible confusions (and/or sloppiness)
+between the web app and the database.
+
+After some tinkering, and some cool idea which not worked (unicode similar characters),
+let's try something simpler (hoping for a very sloppy backend management) and register
+a " admin" (without quotes, they're here just to highligth the space in the string):
+
+"
+admin your account has been created
+"
+
+that looks good, now let's login with that:
+
+"
+Welcome back admin FLAG-0Kg64o8M9gPQfH45583Mc0jc3u
+"
+
+It worked.
+
+But why it worked? Let's lay down some hypothesis (which could well be totally wrong):
+
+the idea is that (at time of sign up) the username is treated in the backend script "as is",
+without being stripped/trimmed, (and we could guess a select with it will yield nothing, so all good)
+then it's passed to the database where the trimming is done and insert'd in a table which
+primary key is not the username (probably some auto-increment id) and where there is not a unique
+constraint on the username column (it's already checked in the script, why redo it?), so this
+confusion let us inject a new admin entry and, for the login query/script to be in fact an admin.
+
+If someone was asking where my hypothesis for the database table layout came out from, well, my first
+idea was that there were some kind of upsert in the backend, but once checked it (tryng to reregister
+the same user), it seemed wrong:
+
+"
+This account already exist.
+"
+
+so the second thought remained (imho) the most probable one.
+
+
+
+
+
+
